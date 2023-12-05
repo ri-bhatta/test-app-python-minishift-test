@@ -1,0 +1,83 @@
+name: Deploy to OpenShift and Verify
+
+on:
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types:
+      - completed
+
+jobs:
+  deploy-and-verify:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    - name: Set up Minishift
+      run: |
+        MINISHIFT_VERSION=v1.34.3
+        wget -O minishift https://github.com/minishift/minishift/releases/download/${MINISHIFT_VERSION}/minishift-${MINISHIFT_VERSION}-linux-amd64
+        chmod +x minishift
+        sudo mv minishift /usr/local/bin/
+        minishift start --cpus 2 --memory 4096
+
+    - name: Log in to OpenShift
+      run: minishift oc-env | Invoke-Expression
+
+    - name: Deploy to OpenShift
+      run: |
+        oc apply -f openshift/test-deployment.yaml
+        oc apply -f openshift/test-service.yaml
+
+    - name: Wait for Deployment
+      run: |
+        timeout=150
+        interval=5
+        start=$(date +%s)
+        while [[ $(date +%s) -lt $((start + timeout)) ]]; do
+          replicas=$(oc get deployment test-deployment -o=jsonpath='{.status.availableReplicas}')
+          updated_replicas=$(oc get deployment test-deployment -o=jsonpath='{.status.updatedReplicas}')
+          echo "Waiting for deployment rollout to finish: ${updated_replicas:-0} out of ${replicas:-0} updated replicas are available..."
+          if [[ $replicas -gt 0 && $replicas == $updated_replicas ]]; then
+            echo "Deployment successfully rolled out!"
+            break
+          fi
+          sleep $interval
+        done
+        if [[ $replicas -gt 0 && $replicas != $updated_replicas ]]; then
+          echo "Error: Deployment rollout did not finish within the timeout"
+          echo "Getting more information..."
+          oc describe deployment test-deployment
+          oc describe pods
+          oc logs -f deployment/test-deployment
+          oc scale deployment test-deployment --replicas=0
+          oc scale deployment test-deployment --replicas=1
+          exit 1
+        fi
+
+    - name: Get Deployment Info
+      run: oc get deployment test-deployment
+
+    - name: Get Pod Info
+      run: oc get pods
+
+    - name: Get Service Info
+      run: oc get service test-service
+
+    - name: Get Events
+      run: oc get events
+
+    - name: View Logs
+      run: |
+        POD_NAME=$(oc get pods -o jsonpath="{.items[0].metadata.name}")
+        timeout=60  # Adjust the timeout value as needed
+        interval=2
+        start=$(date +%s)
+        while [[ $(date +%s) -lt $((start + timeout)) ]]; do
+          oc logs $POD_NAME
+          sleep $interval
+        done
+
+    - name: Clean up Minishift
+      run: minishift stop
